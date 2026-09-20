@@ -59,12 +59,41 @@ class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
     ``tool_choice`` langchain sends for function-calling structured output. Bind
     the schema as a tool but don't force tool_choice, so structured output works
     across local servers regardless of the model ID's capabilities (#1057).
+
+    gpt-oss served without a harmony-aware tool parser can leak its channel
+    tokens into the tool name (``get_stock_data<|channel|>commentary``), which
+    then matches no tool. Strip everything from the first ``<|`` on.
     """
+
+    def _create_chat_result(self, response, generation_info=None):
+        chat_result = super()._create_chat_result(response, generation_info)
+        for generation in chat_result.generations:
+            message = generation.message
+            if not isinstance(message, AIMessage):
+                continue
+            for call in message.tool_calls:
+                call["name"] = call["name"].split("<|", 1)[0]
+        return chat_result
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         resolved = method or get_capabilities(self.model_name).preferred_structured_method
         if resolved == "function_calling":
             kwargs.setdefault("tool_choice", None)
+        return super().with_structured_output(schema, method=method, **kwargs)
+
+
+class OpenAICompatibleChatOpenAI(LocalCompatibleChatOpenAI):
+    """Generic ``openai_compatible`` endpoint (vLLM, LM Studio, llama.cpp).
+
+    Tool-call structured output is unreliable on these models: gpt-oss mangles
+    the schema tool's name (``traderProposal``) or answers in plain text,
+    leaving the parser empty. Constrained ``json_schema`` decoding, which
+    these servers support, always parses.
+    """
+
+    def with_structured_output(self, schema, *, method=None, **kwargs):
+        if method is None and get_capabilities(self.model_name).preferred_structured_method != "none":
+            method = "json_schema"
         return super().with_structured_output(schema, method=method, **kwargs)
 
 
@@ -229,7 +258,7 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
                                chat_class=LocalCompatibleChatOpenAI),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
     "openai_compatible": ProviderSpec(
-        require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI
+        require_base_url=True, key_optional=True, chat_class=OpenAICompatibleChatOpenAI
     ),
 }
 
